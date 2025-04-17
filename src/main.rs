@@ -1,3 +1,4 @@
+mod mod_api_struct;
 
 use std::env;
 use std::error::Error;
@@ -10,9 +11,10 @@ use colored::Colorize;
 use zip;
 use json5;
 use prettytable::{cell, format, row, Cell, Row, Table};
-use reqwest::Response;
+use reqwest::{header, Response, StatusCode};
 use serde_json::Value;
 use tokio;
+use crate::mod_api_struct::{Mod, ModJson};
 
 #[allow(dead_code)]
 fn list_files(dir_path: &str) -> Result<(), Box<dyn Error>> {
@@ -77,39 +79,28 @@ fn get_case_insensitive<'a>(obj: &'a Value, key: &str) -> Option<&'a Value> {
     }
 }
 
-async fn fetch_mod_from_id(mod_id: &str) -> Result<String, Box<dyn Error>> {
+async fn fetch_mod_from_id(mod_id: &str) -> Result<ModJson, Box<dyn Error>> {
     let url = format!("https://mods.vintagestory.at/api/mod/{}", &mod_id.trim_matches('"'));
     println!("Fetching {}", url);
-    Ok(reqwest::Client::new().get(url).send().await?.text().await?)
-}
+    // let client = reqwest::Client::new();
+    let result = reqwest::get(&url).await?;
 
-// fn check_code(code: u16) -> String {
-//
-// }
-
-async fn check_version(blob: &str) -> Result<(), Box<dyn Error>> {
-    // get json blob from http request
-    // compare version against the current version
-    // call update_mod()
-
-    // get the version from the blob
-    // mod -> releases[0] -> modversion
-
-    let json = json5::from_str::<Value>(&blob)?;
-    // let version = json.get("mod").unwrap().as_str().unwrap()
-
-    match json {
-        Ok(T) => {
-            eprintln!("Checking {}", blob);
+    match result.status() {
+        StatusCode::OK => {
+            let text = result.json::<Mod>().await?;
+            // eprintln!("Found text: {:?}", text);
+            Ok(text.mod_json)
         },
-        None => {
-            println!("{} is not a JSON object", blob);
+        _ => {
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Can't fetch modid: {}", mod_id.red()),
+            )))
+
         }
     }
-
-
-    Ok(())
 }
+
 
 async fn process_zip(file_path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
 
@@ -143,12 +134,9 @@ async fn process_zip(file_path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
             let mod_version = get_case_insensitive(&c, "version").unwrap().to_string();
 
             // send the http reqwests for the mod
-            match fetch_mod_from_id(&mod_id).await {
-                Ok(data) => {
-                    check_version(&data).await?;
-                }
-                _ => {}
-            }
+            // eprintln!("{}", "Failing after this?".red());
+            let mod_result = fetch_mod_from_id(&mod_id).await?;
+            eprintln!("Found mod: {:?}: ID: {:?}", mod_result.name.unwrap(), mod_result.modid);
 
             out_vec.push(mod_name);
             out_vec.push(mod_id);
