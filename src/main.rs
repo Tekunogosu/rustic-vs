@@ -6,51 +6,53 @@ use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use colored::Colorize;
 use zip;
 use json5;
-use prettytable::{cell, format, row, Cell, Row, Table};
-use reqwest::{header, Response, StatusCode};
+use prettytable::{format, Cell, Row, Table};
+use reqwest::StatusCode;
 use serde_json::Value;
 use tokio;
 use crate::mod_api_struct::{Mod, ModJson};
 
-#[allow(dead_code)]
-fn list_files(dir_path: &str) -> Result<(), Box<dyn Error>> {
-    let entries = fs::read_dir(dir_path)?;
+use rayon::prelude::*;
 
-    let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-
-    entries_vec.sort_by(|a, b| {
-        let a_name = a.file_name().to_string_lossy().to_lowercase();
-        let b_name = b.file_name().to_string_lossy().to_lowercase();
-        a_name.cmp(&b_name)
-    });
-
-    for entry in entries_vec {
-        let path = entry.path();
-
-        // get the file name
-        let file_name = path.file_name().unwrap().to_string_lossy();
-
-        let file_type = if path.is_dir() { "directory" } else { "file" };
-
-        // try te get the file size
-        let size = if path.is_file() {
-            match fs::metadata(&path) {
-                Ok(metadata) => metadata.len().to_string(),
-                Err(_) => "unknown".to_string(),
-            }
-        } else {
-            "-".to_string()
-        };
-
-        eprintln!("{:<50} {:<10} {:10} bytes", file_name.blue(), file_type.yellow(), size.blue());
-    }
-
-    Ok(())
-}
+// #[allow(dead_code)]
+// fn list_files(dir_path: &str) -> Result<(), Box<dyn Error>> {
+//     let entries = fs::read_dir(dir_path)?;
+//
+//     let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+//
+//     entries_vec.sort_by(|a, b| {
+//         let a_name = a.file_name().to_string_lossy().to_lowercase();
+//         let b_name = b.file_name().to_string_lossy().to_lowercase();
+//         a_name.cmp(&b_name)
+//     });
+//
+//     for entry in entries_vec {
+//         let path = entry.path();
+//
+//         // get the file name
+//         let file_name = path.file_name().unwrap().to_string_lossy();
+//
+//         let file_type = if path.is_dir() { "directory" } else { "file" };
+//
+//         // try te get the file size
+//         let size = if path.is_file() {
+//             match fs::metadata(&path) {
+//                 Ok(metadata) => metadata.len().to_string(),
+//                 Err(_) => "unknown".to_string(),
+//             }
+//         } else {
+//             "-".to_string()
+//         };
+//
+//         eprintln!("{:<50} {:<10} {:10} bytes", file_name.blue(), file_type.yellow(), size.blue());
+//     }
+//
+//     Ok(())
+// }
 
 
 fn validate_dir(dir: &str) -> Result<(), String> {
@@ -193,39 +195,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // list_files(dir_to_scan.as_str())
-    let entries = fs::read_dir(dir_to_scan)?;
+    let entries: Vec<_> = fs::read_dir(dir_to_scan).unwrap().collect();
 
     let mut table = Table::new();
 
     table.set_format(*format::consts::FORMAT_DEFAULT);
     table.set_titles(Row::new(vec![
-        Cell::new("Mod Name").style_spec("FbBd+"),
-        Cell::new("ModID").style_spec("FbBd+"),
-        Cell::new("Author(s)").style_spec("FbBd+"),
-        Cell::new("Installed Version").style_spec("FbBd+"),
-        Cell::new("Latest Version").style_spec("FbBd+"),
-        Cell::new("Is Updated").style_spec("FbBd+"),
+        Cell::new("Mod Name").style_spec("Fb+"),
+        Cell::new("ModID").style_spec("Fb+"),
+        Cell::new("Author(s)").style_spec("Fb+"),
+        Cell::new("Installed Version").style_spec("Fb+"),
+        Cell::new("Latest Version").style_spec("Fb+"),
+        Cell::new("Is Updated").style_spec("Fb+"),
     ]));
 
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        // check only the zip files
-        if path.is_file() && path.extension().map_or(false, |ext| ext == "zip") {
-            eprintln!("Checking file: {}", path.to_string_lossy().blue().bold());
-            let mod_info = process_zip(&path).await?;
-            for i in mod_info {
-                let is_updated = if i.is_updated {
-                    Cell::new("True").style_spec("Fg") } else { Cell::new("False").style_spec("FR") };
-                table.add_row(Row::new(vec![
-                    Cell::new(i.name.as_str()).style_spec("FC"),
-                    Cell::new(i.modid.as_str()).style_spec("FC"),
-                    Cell::new(i.author.as_str()).style_spec("FC"),
-                    Cell::new(i.installed_version.as_str().trim_matches('"')).style_spec("Fw"),
-                    Cell::new(i.latest_version.as_str()).style_spec(format!("F{}", if i.is_updated { "g" } else { "r" }).as_str()),
-                    is_updated,]));
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let thread_results = Arc::clone(&results);
+
+    entries.into_par_iter()
+        .filter_map(Result::ok)
+        .for_each(|entry| {
+            let path = entry.path();
+            // check only the zip files
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "zip") {
+                eprintln!("Checking file: {}", path.to_string_lossy().blue().bold());
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let mod_info = rt.block_on(process_zip(&path)).unwrap();
+
+                for i in mod_info {
+                    let is_updated = if i.is_updated {
+                        Cell::new("True").style_spec("Fg") } else { Cell::new("False").style_spec("FR") };
+
+                    let row = Row::new(vec![
+                        Cell::new(i.name.as_str()).style_spec("FC"),
+                        Cell::new(i.modid.as_str()).style_spec("FC"),
+                        Cell::new(i.author.as_str()).style_spec("FC"),
+                        Cell::new(i.installed_version.as_str().trim_matches('"')).style_spec("Fw"),
+                        Cell::new(i.latest_version.as_str()).style_spec(format!("F{}", if i.is_updated { "g" } else { "r" }).as_str()),
+                        is_updated,]);
+
+                    thread_results.lock().unwrap().push(row);
+                }
             }
-        }
+    });
+
+    for row in results.lock().unwrap().iter() {
+        table.add_row(row.clone());
     }
 
     table.printstd();
