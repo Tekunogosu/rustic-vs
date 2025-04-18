@@ -82,13 +82,11 @@ fn get_case_insensitive<'a>(obj: &'a Value, key: &str) -> Option<&'a Value> {
 async fn fetch_mod_from_id(mod_id: &str) -> Result<ModJson, Box<dyn Error>> {
     let url = format!("https://mods.vintagestory.at/api/mod/{}", &mod_id.trim_matches('"'));
     println!("Fetching {}", url);
-    // let client = reqwest::Client::new();
     let result = reqwest::get(&url).await?;
 
     match result.status() {
         StatusCode::OK => {
             let text = result.json::<Mod>().await?;
-            // eprintln!("Found text: {:?}", text);
             Ok(text.mod_json)
         },
         _ => {
@@ -101,12 +99,21 @@ async fn fetch_mod_from_id(mod_id: &str) -> Result<ModJson, Box<dyn Error>> {
     }
 }
 
+struct TableData {
+    name: String,
+    modid: String,
+    author: String,
+    installed_version: String,
+    latest_version: String,
+    is_updated: bool,
+}
 
-async fn process_zip(file_path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+async fn process_zip(file_path: &Path) -> Result<Vec<TableData>, Box<dyn Error>> {
 
     let file = File::open(file_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let mut out_vec = Vec::new();
+
+    let mut out_data: Vec<TableData> = Vec::new();
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
@@ -123,8 +130,7 @@ async fn process_zip(file_path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
         };
 
         if let Some(c) = contents {
-            // get
-            eprintln!("{}", format!("modinfo.json: {}", c).green());
+            // eprintln!("{}", format!("modinfo.json: {}", c).green());
 
             let mod_name = get_case_insensitive(&c, "name").unwrap().to_string();
             let mod_id = get_case_insensitive(&c, "modid").unwrap().to_string();
@@ -134,18 +140,24 @@ async fn process_zip(file_path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
             let mod_version = get_case_insensitive(&c, "version").unwrap().to_string();
 
             // send the http reqwests for the mod
-            // eprintln!("{}", "Failing after this?".red());
             let mod_result = fetch_mod_from_id(&mod_id).await?;
-            eprintln!("Found mod: {:?}: ID: {:?}", mod_result.name.unwrap(), mod_result.modid);
 
-            out_vec.push(mod_name);
-            out_vec.push(mod_id);
-            out_vec.push(mod_author);
-            out_vec.push(mod_version);
+            let latest_version = mod_result.releases[0].modversion.to_owned().unwrap();
+
+
+            out_data.push(TableData {
+                name: mod_name,
+                modid: mod_id,
+                author: mod_author,
+                installed_version: mod_version.clone(),
+                latest_version: latest_version.clone(),
+                is_updated: latest_version == mod_version.trim_matches('"'),
+
+            })
         }
     }
 
-    Ok(out_vec)
+    Ok(out_data)
 }
 
 
@@ -190,7 +202,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Cell::new("Mod Name").style_spec("FbBd+"),
         Cell::new("ModID").style_spec("FbBd+"),
         Cell::new("Author(s)").style_spec("FbBd+"),
-        Cell::new("Version").style_spec("FbBd+"),
+        Cell::new("Installed Version").style_spec("FbBd+"),
+        Cell::new("Latest Version").style_spec("FbBd+"),
+        Cell::new("Is Updated").style_spec("FbBd+"),
     ]));
 
     for entry in entries {
@@ -200,7 +214,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if path.is_file() && path.extension().map_or(false, |ext| ext == "zip") {
             eprintln!("Checking file: {}", path.to_string_lossy().blue().bold());
             let mod_info = process_zip(&path).await?;
-            table.add_row(Row::new(mod_info.iter().map(|v| Cell::new(v)).collect()));
+            for i in mod_info {
+                let is_updated = if i.is_updated {
+                    Cell::new("True").style_spec("Fg") } else { Cell::new("False").style_spec("FR") };
+                table.add_row(Row::new(vec![
+                    Cell::new(i.name.as_str()).style_spec("FC"),
+                    Cell::new(i.modid.as_str()).style_spec("FC"),
+                    Cell::new(i.author.as_str()).style_spec("FC"),
+                    Cell::new(i.installed_version.as_str().trim_matches('"')).style_spec("Fw"),
+                    Cell::new(i.latest_version.as_str()).style_spec(format!("F{}", if i.is_updated { "g" } else { "r" }).as_str()),
+                    is_updated,]));
+            }
         }
     }
 
